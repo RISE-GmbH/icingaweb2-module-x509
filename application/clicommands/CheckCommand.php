@@ -93,7 +93,12 @@ class CheckCommand extends Command
             ->columns([new Expression('MAX(GREATEST(%s, %s))', ['valid_from', 'issuer_certificate.valid_from'])])
             ->getSelectBase()
             ->resetWhere()
-            ->where(new Expression('sub_certificate_link.certificate_chain_id = target_chain.id'));
+            // Some cert chains may contain some irrelevant certificates, but we're only interested in the first one.
+            ->where(new Expression('sub_certificate_link.order = 0'))
+            ->where(new Expression('sub_certificate_link.certificate_chain_id = target_chain.id'))
+            // If the current cert is a self-signed one, we don't need to look for other valid_from timestamps within
+            // that chain, as there's no other certificate on top of a self-signed one, i.e. it's already the root CA.
+            ->where(new Expression("sub_certificate.self_signed != 'y'"));
 
         // Sub query for `valid_to` column
         $validTo = $targets->createSubQuery(new X509Certificate(), 'chain.certificate');
@@ -102,16 +107,26 @@ class CheckCommand extends Command
             ->getSelectBase()
             // Reset the where clause generated within the createSubQuery() method.
             ->resetWhere()
-            ->where(new Expression('sub_certificate_link.certificate_chain_id = target_chain.id'));
+            // Some cert chains may contain some irrelevant certificates, but we're only interested in the first one.
+            ->where(new Expression('sub_certificate_link.order = 0'))
+            ->where(new Expression('sub_certificate_link.certificate_chain_id = target_chain.id'))
+            // If the current cert is a self-signed one, we don't need to look for other valid_to timestamps within
+            // that chain, as there's no other certificate on top of a self-signed one, i.e. it's already the root CA.
+            ->where(new Expression("sub_certificate.self_signed != 'y'"));
 
         list($validFromSelect, $_) = $validFrom->dump();
         list($validToSelect, $_) = $validTo->dump();
         $targets
             ->withColumns([
-                'valid_from' => new Expression($validFromSelect),
-                'valid_to'   => new Expression($validToSelect)
+                'valid_from' => new Expression(
+                    sprintf('COALESCE((%s), target_chain_certificate.valid_from)', $validFromSelect)
+                ),
+                'valid_to'   => new Expression(
+                    sprintf('COALESCE((%s), target_chain_certificate.valid_to)', $validToSelect)
+                )
             ])
             ->getSelectBase()
+            ->distinct()
             ->where(new Expression('target_chain_link.order = 0'));
 
         if ($ip !== null) {
